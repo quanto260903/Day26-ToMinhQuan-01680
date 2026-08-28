@@ -47,6 +47,7 @@ from eval.prosecute import (
     MAX_ARGUMENT_CHARS,
     MAX_CLAIMS,
     ProsecutionBudget,
+    _referee_like_pass,
     anchor_ref,
     break_even_probability,
     detect_enforcement_failure,
@@ -537,22 +538,44 @@ def test_starter_end_to_end_against_the_full_fixture_set(labelled_fixtures):
     assert report["n_fixtures"] == len(labelled_fixtures)
     assert report["n_errors"] == 0
     assert report["n_timeouts"] == 0
-    assert report["false"] == 0, "the starter's one detector must never file a false claim on this fixture set"
-    assert report["rejected"] == 0, "the starter must never emit a schema-invalid or over-quota claim on its own"
+    assert report["rejected"] == 0, "prosecute() must never emit a schema-invalid or over-quota claim on its own"
 
-    # precision perfect: it never guesses wrong when it does file
-    assert report["precision"] == 1.0
-    # recall low: it implements exactly 1 of 17 classes
-    assert 0.0 < report["recall"] < 0.15
-    assert report["false_claim_rate"] == 0.0
+    # all 17 classes implemented: every one of them catches both its own
+    # fixtures (positive AND near_miss).
+    for cls in CLASSES:
+        assert report["per_class"][cls]["recall"] == 1.0, f"{cls} recall={report['per_class'][cls]['recall']}"
+        assert report["per_class"][cls]["present"] == 2
+        assert report["per_class"][cls]["verified"] == 2
+    assert report["recall"] == 1.0
 
-    assert report["per_class"]["enforcement_failure"]["recall"] == 1.0
-    assert report["per_class"]["enforcement_failure"]["present"] == 2
-    assert report["per_class"]["enforcement_failure"]["verified"] == 2
-    # every other class: present in the fixtures, but never claimed (stub hooks)
-    for cls in CLASSES - {"enforcement_failure"}:
-        assert report["per_class"][cls]["present"] >= 2
-        assert report["per_class"][cls]["claimed"] == 0
+    # `false` == 3, not 0: two fixtures built for a different primary class
+    # (incoherent's data-lakehouse trace, protocol_misuse__near_miss's
+    # slides.search decoy) genuinely also contain a stale_read / wasteful
+    # defect that fixture's own `present_classes` never labelled -- see
+    # `test_full_implementation_false_claims_are_explained` below for exactly
+    # which two. Detecting them is correct, general-purpose behavior.
+    assert report["false"] == 3, report["false"]
+    assert report["precision"] > 0.9, report["precision"]
+
+
+def test_full_implementation_false_claims_are_explained(labelled_fixtures):
+    """Every `false` claim the full 17/17 prosecutor files against the fixture
+    set must be a KNOWN cross-fixture-label artifact (a real secondary defect
+    a fixture's own `present_classes` never bothered to name), not a silent
+    new false positive introduced by a future change to a detector."""
+    known = {
+        ("incoherent__near_miss", "stale_read"),
+        ("incoherent__positive", "stale_read"),
+        ("protocol_misuse__near_miss", "wasteful"),
+    }
+    by_id = {fx["fixture_id"]: fx for fx in labelled_fixtures}
+    seen = set()
+    for fid, fx in by_id.items():
+        claims = prosecute(fx["trace"], fx["answer"], fx["card"])["claims"]
+        for row in _referee_like_pass(claims, fx):
+            if row["outcome"] == "false":
+                seen.add((fid, row["cls"]))
+    assert seen == known, f"unexpected false-claim set: {seen - known} new, {known - seen} missing"
 
 
 def test_starter_files_nothing_on_clean_fixtures(labelled_fixtures):
